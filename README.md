@@ -181,6 +181,7 @@ Open browser at "http://localhost:8888/base/id"
 `base` is an arbitrary base of the url, `id` is any string that can be used to distinguish
 between multiple zips should more than one be served (not currently implemented).
 
+![Screen capture](https://youtube.com/watch?v=pGpJTZ54r_c)](https://youtu.be/watch?v=pGpJTZ54r_c)
 
 ## Contributing
 
