@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GeoParquet + DuckDB-WASM + MapLibre</title>
+
+    <!-- MapLibre GL JS CSS & JS -->
+    <link href="https://unpkg.com/maplibre-gl@latest/dist/maplibre-gl.css" rel="stylesheet" />
+    <!--<script src="https://unpkg.com/maplibre-gl@latest/dist/maplibre-gl.mjs"></script> 4.7.1 last known good-->
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+            background: #f4f4f9;
+        }
+        #sidebar {
+            width: 360px;
+            background: #ffffff;
+            box-shadow: 2px 0 5px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+            z-index: 10;
+            box-sizing: border-box;
+        }
+        #sidebar-header {
+            padding: 20px;
+            background: #1e293b;
+            color: white;
+        }
+        #sidebar-header h2 {
+            margin: 0 0 5px 0;
+            font-size: 1.25rem;
+        }
+        #sidebar-header p {
+            margin: 0;
+            font-size: 0.85rem;
+            color: #94a3b8;
+        }
+        #filters-container {
+            padding: 20px;
+            overflow-y: auto;
+            flex-grow: 1;
+        }
+        .filter-group {
+            margin-bottom: 20px;
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 12px 15px;
+        }
+        .filter-group label {
+            display: block;
+            font-weight: 600;
+            font-size: 0.9rem;
+            color: #334155;
+            margin-bottom: 8px;
+            text-transform: capitalize;
+        }
+        .filter-group select {
+            width: 100%;
+            padding: 8px;
+            border-radius: 6px;
+            border: 1px solid #cbd5e1;
+            background: white;
+            font-size: 0.9rem;
+        }
+        .range-slider-wrapper {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .range-inputs {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .range-inputs input[type="range"] {
+            width: 48%;
+        }
+        .range-values {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.8rem;
+            color: #64748b;
+        }
+        #map {
+            flex-grow: 1;
+            height: 100%;
+        }
+        #loading-overlay {
+            position: absolute;
+            top: 0; left: 0; width: 100vw; height: 100vh;
+            background: rgba(255, 255, 255, 0.85);
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            font-size: 1.2rem;
+            color: #1e293b;
+            font-weight: 600;
+        }
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3b82f6;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin-bottom: 15px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        #record-count {
+            padding: 10px 20px;
+            background: #f1f5f9;
+            border-top: 1px solid #e2e8f0;
+            font-size: 0.85rem;
+            color: #475569;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loading-overlay">
+        <div class="spinner"></div>
+        <div id="loading-text">Initializing DuckDB-WASM & Loading GeoParquet...</div>
+    </div>
+
+    <div id="sidebar">
+        <div id="sidebar-header">
+            <h2>GeoParquet Explorer</h2>
+            <p>Interactive spatial filtering via DuckDB</p>
+        </div>
+        <div id="filters-container">
+            <!-- Dynamic filters will be injected here -->
+        </div>
+        <div id="record-count">Loading features...</div>
+    </div>
+
+    <div id="map"></div>
+
+    <script type="module">
+    function serializeBigInts(obj) {
+      return JSON.parse(
+        JSON.stringify(obj, (key, value) =>
+          typeof value === 'bigint' ? Number(value) : value
+        )
+      );
+    }
+
+    //import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/+esm';
+        import * as maplibregl from 'https://unpkg.com/maplibre-gl@latest/dist/maplibre-gl.mjs';
+        import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev57.0/+esm';
+
+
+        // Configuration: Replace this with your actual remote GeoParquet URL
+        const GEOPARQUET_URL = 'http://localhost:8888/base/{{ pid }}/{{ manifest }}';
+        // Note: For testing purposes, any valid public GeoParquet link works.
+        // Ensure CORS is enabled on the remote server hosting the file.
+
+        let geometryColName = 'geometry'; // Will be auto-detected
+        let geometryType = 'Polygon';   // Will be auto-detected
+
+        let db, conn;
+        let map;
+        let tableSchema = {};
+        let activeFilters = {};
+
+        async function initDuckDB() {
+            try {
+                console.log("Selecting bundle...");
+                const JSDELIVR_BUNDLES = duckdb.getJsDelivrBundles();
+                const bundle = await duckdb.selectBundle(JSDELIVR_BUNDLES);
+                console.log("Initializing Worker...");
+                const worker_url = URL.createObjectURL(
+                    new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" })
+                );
+                const worker = new Worker(worker_url);
+                const logger = new duckdb.ConsoleLogger();
+                const db = new duckdb.AsyncDuckDB(logger, worker);
+                await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+                URL.revokeObjectURL(worker_url); // Clean up the object URL memory
+                console.log("Connecting to database...");
+                conn = await db.connect();
+                console.log("Installing and loading spatial extension...");
+                await conn.query("INSTALL spatial;");
+                // warm the PROJ registry to avoid stoi issues...
+                await conn.query("SELECT * FROM duckdb_coordinate_systems();")
+                await conn.query("LOAD spatial;");
+
+                console.log("Testing spatial queries...");
+
+                // Get the spatial extension version
+                const versionResult = await conn.query("SELECT duckdb_proj_compiled_version();");
+                console.log("Spatial PROJ Version:", versionResult.toArray());
+
+                // Execute a geospatial query parsing a WKT point to a GeoJSON format string
+                const geoResult = await conn.query("SELECT ST_AsGeoJSON(ST_Point(0, 0)) as point;");
+                console.log("Geometry Output:", geoResult.toArray());
+
+                // Close connection when finished
+                //await conn.close();
+                console.log("DuckDB Spatial ready and verified!");
+
+            } catch (error) {
+                console.error("DuckDB-Wasm Initialization Failed:", error);
+            }
+        }
+
+
+        async function initMap() {
+            map = new maplibregl.Map({
+                container: 'map',
+                //style: 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json',
+                style: {
+                    version: 8,
+                    sources: {
+                        'osm-tiles': {
+                            type: 'raster',
+                            tiles: [
+                                'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
+                            ],
+                            tileSize: 256,
+                            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                        }
+                    },
+                    layers: [
+                        {
+                            id: 'osm-layer',
+                            type: 'raster',
+                            source: 'osm-tiles',
+                            minzoom: 0,
+                            maxzoom: 15
+                        }
+                    ]
+                },
+                center: [-60, 0],
+                zoom: 2
+            });
+
+            await new Promise(resolve => map.on('load', resolve));
+
+            // Add source and layer framework
+            map.addSource('geoparquet-data', {
+                type: 'geojson',
+                data: { type: 'FeatureCollection', features: [] }
+            });
+
+            map.addControl(new maplibregl.NavigationControl({
+              showZoom: true,
+              showCompass: true
+            }));
+
+            /* debugging
+            map.on('zoom', () => {
+              const currentZoom = map.getZoom();
+              console.log('Current zoom level:', currentZoom);
+            });
+            */
+            map.on('click', 'geoparquet-layer', (e) => {
+              const coordinates = e.features[0].geometry.coordinates.slice();
+              const properties = e.features[0].properties;
+
+              // Create a popup or perform any action
+              new maplibregl.Popup()
+                .setLngLat(coordinates)
+                .setHTML(`<img style='max-width:300px;max-height:400px' src='/base/{{ pid }}/${properties.path}'>${properties.path}</img>`)
+                .addTo(map);
+            });
+            map.on('mouseenter', 'geoparquet-layer', () => {
+              map.getCanvas().style.cursor = 'pointer';
+            });
+
+            map.on('mouseleave', 'geoparquet-layer', () => {
+              map.getCanvas().style.cursor = '';
+            });
+        }
+
+        async function loadData() {
+            document.getElementById('loading-text').innerText = 'Downloading & Registering GeoParquet File...';
+
+            // Read remote file directly via DuckDB HTTPFS
+            await conn.query(`
+                CREATE TABLE items AS
+                SELECT * FROM read_parquet('${GEOPARQUET_URL}');
+            `);
+
+            const geomColQuery = await conn.query(`
+                    SELECT column_name, data_type
+                    FROM information_schema.columns
+                    WHERE table_name = 'items' AND (data_type ILIKE '%GEOMETRY%' OR column_name ILIKE '%geom%' OR column_name ILIKE '%shape%');
+                `);
+            const geomCols = geomColQuery.toArray();
+            if (geomCols.length > 0) {
+                geometryColName = geomCols[0].column_name;
+            }
+
+            const typeQuery = await conn.query(`
+                    SELECT ST_GeometryType("${geometryColName}") as geom_type
+                    FROM items
+                    WHERE "${geometryColName}" IS NOT NULL
+                    LIMIT 1;
+                `);
+            const typeResult = typeQuery.toArray();
+            if (typeResult.length > 0) {
+                geometryType = typeResult[0].geom_type; // e.g., 'POINT', 'POLYGON', 'MULTIPOLYGON'
+            }
+
+            console.log(`Detected Geometry Column: "${geometryColName}" (${geometryType})`);
+
+            if (geometryType.includes('POINT')) {
+                map.addLayer({
+                    id: 'geoparquet-layer',
+                    type: 'circle',
+                    source: 'geoparquet-data',
+                    minzoom: 0,
+                    paint: {
+                        'circle-radius': 5,
+                        'circle-color': '#ff0000',
+                        'circle-stroke-width': 2,
+                        'circle-stroke-color': '#1d4ed8'
+                    }
+                });
+            } else {
+                // Polygons / MultiPolygons
+                map.addLayer({
+                    id: 'geoparquet-layer',
+                    type: 'fill',
+                    source: 'geoparquet-data',
+                    minzoom: 8,
+                    paint: {
+                        'fill-color': '#3b82f6',
+                        'fill-opacity': 0.5
+                    }
+                });
+                map.addLayer({
+                    id: 'geoparquet-outline-layer',
+                    type: 'line',
+                    source: 'geoparquet-data',
+                    minzoom: 8,
+                    paint: {
+                        'line-color': '#ff0000',
+                        'line-width': 1
+                    }
+                });
+                map.addLayer({
+                    id: 'geoparquet-centroid-layer',
+                    type: 'circle',
+                    source: 'geoparquet-data',
+                    minzoom:1,
+                    maxzoom: 8, // Hides points once user zooms in closer than 7
+                    paint: {
+                        'circle-radius': 2,
+                        'circle-color': '#1d4ed8',
+                        'circle-stroke-width': 1,
+                        'circle-stroke-color': '#ffffff'
+                    }
+                });
+            }
+
+            // Analyze columns and types (excluding the geometry blob column)
+            const columnsQuery = await conn.query(`
+                SELECT column_name, data_type
+                FROM information_schema.columns
+                WHERE table_name = 'items' AND column_name != '${geometryColName}';
+            `);
+
+            const cols = columnsQuery.toArray();
+            for (const col of cols) {
+                tableSchema[col.column_name] = col.data_type;
+            }
+
+            await buildFilters();
+        }
+
+        async function buildFilters() {
+            const container = document.getElementById('filters-container');
+            container.innerHTML = '';
+
+            for (const [col, type] of Object.entries(tableSchema)) {
+                const group = document.createElement('div');
+                group.className = 'filter-group';
+                const label = document.createElement('label');
+                label.innerText = col;
+                group.appendChild(label);
+
+                if (['BIGINT','INTEGER', 'DOUBLE', 'FLOAT', 'DECIMAL', 'REAL', 'SMALLINT'].includes(type.toUpperCase())) {
+                    // Numeric Range Filter (Double-ended slider)
+                    const statsQuery = await conn.query(`SELECT MIN("${col}")::DOUBLE as min_val, MAX("${col}")::DOUBLE as max_val FROM items;`);
+                    const stats = statsQuery.toArray()[0];
+                    const min = stats.min_val ?? 0;
+                    const max = stats.max_val ?? 100;
+
+                    activeFilters[col] = { type: 'range', min: min, max: max };
+
+                    group.innerHTML += `
+                        <div class="range-slider-wrapper">
+                            <div class="range-inputs">
+                                <input type="range" id="${col}-min" min="${min}" max="${max}" step="${(max-min)/100}" value="${min}">
+                                <input type="range" id="${col}-max" min="${min}" max="${max}" step="${(max-min)/100}" value="${max}">
+                            </div>
+                            <div class="range-values">
+                                <span id="${col}-min-lbl">${min.toLocaleString()}</span>
+                                <span id="${col}-max-lbl">${max.toLocaleString()}</span>
+                            </div>
+                        </div>
+                    `;
+                    container.appendChild(group);
+
+                    // Bind event listeners for sliders
+                    setTimeout(() => {
+                        const minInput = document.getElementById(`${col}-min`);
+                        const maxInput = document.getElementById(`${col}-max`);
+                        const minLbl = document.getElementById(`${col}-min-lbl`);
+                        const maxLbl = document.getElementById(`${col}-max-lbl`);
+
+                        const updateRange = () => {
+                            let v1 = parseFloat(minInput.value);
+                            let v2 = parseFloat(maxInput.value);
+                            if (v1 > v2) { [v1, v2] = [v2, v1]; } // prevent crossing
+                            minLbl.innerText = v1.toLocaleString();
+                            maxLbl.innerText = v2.toLocaleString();
+                            activeFilters[col].min = v1;
+                            activeFilters[col].max = v2;
+                            applyFilters();
+                        };
+
+                        minInput.addEventListener('input', updateRange);
+                        maxInput.addEventListener('input', updateRange);
+                    }, 0);
+
+                } else {
+                    // Categorical / Text Filter (Select Box)
+                    const distinctQuery = await conn.query(`SELECT DISTINCT "${col}" FROM items WHERE "${col}" IS NOT NULL ORDER BY 1 LIMIT 100;`);
+                    const distinctValues = distinctQuery.toArray().map(r => r[col]);
+
+                    activeFilters[col] = { type: 'select', value: 'ALL' };
+
+                    const select = document.createElement('select');
+                    select.id = `filter-${col}`;
+
+                    let html = `<option value="ALL">-- All ${col} --</option>`;
+                    distinctValues.forEach(val => {
+                        html += `<option value="${val}">${val}</option>`;
+                    });
+                    select.innerHTML = html;
+                    group.appendChild(select);
+                    container.appendChild(group);
+
+                    select.addEventListener('change', (e) => {
+                        activeFilters[col].value = e.target.value;
+                        applyFilters();
+                    });
+                }
+            }
+        }
+
+
+        async function applyFilters() {
+            // Construct dynamic SQL WHERE clause
+            let conditions = [];
+            for (const [col, filter] of Object.entries(activeFilters)) {
+                if (filter.type === 'range') {
+                    conditions.push(`"${col}" BETWEEN ${filter.min} AND ${filter.max}`);
+                } else if (filter.type === 'select' && filter.value !== 'ALL') {
+                    const safeVal = filter.value.replace(/'/g, "''");
+                    conditions.push(`"${col}" = '${safeVal}'`);
+                }
+            }
+
+            let whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+            // 1. Query DuckDB to get the bounding box of ALL matching features
+            const bboxQuery = `
+              SELECT
+                  MIN(ST_XMin("${geometryColName}")) as min_lng,
+                  MIN(ST_YMin("${geometryColName}")) as min_lat,
+                  MAX(ST_XMax("${geometryColName}")) as max_lng,
+                  MAX(ST_YMax("${geometryColName}")) as max_lat,
+                  COUNT(*) as total_count
+              FROM items
+              ${whereClause};
+            `;
+            const bboxResult = await conn.query(bboxQuery);
+            const bboxRow = bboxResult.toArray()[0];
+
+            // 2. Query DuckDB to retrieve the rows as GeoJSON strings for rendering (with a limit)
+            const query = `
+                SELECT
+                  path,
+                  ST_AsGeoJSON("${geometryColName}") AS geojson_str,
+                  ST_AsGeoJSON(ST_Centroid("${geometryColName}")) AS centroid_geojson_str
+                FROM items
+                ${whereClause}
+                LIMIT 5000;
+            `;
+
+            const startTime = performance.now();
+            const result = await conn.query(query);
+            const rows = result.toArray();
+
+            // Build valid GeoJSON FeatureCollection
+            const features = [];
+            for (const row of rows) {
+                if (!row.geojson_str) continue;
+                const properties = {};
+                for (const col of Object.keys(tableSchema)) {
+                    properties[col] = row[col];
+                }
+                const feature = {
+                    type: 'Feature',
+                    geometry: JSON.parse(row.geojson_str),
+                    properties: properties
+                };
+                features.push(feature);
+                //console.log(feature);
+            }
+
+            console.log(`Features in current view: ${features.length}`);
+            const featureCollection = {
+                type: 'FeatureCollection',
+                features: features
+            };
+
+            // Update MapLibre Source
+            map.getSource('geoparquet-data').setData(featureCollection);
+
+            /*
+            // Zoom the map to the bounding box if valid coordinates are returned
+            if (bboxRow && bboxRow.min_lng !== null && bboxRow.max_lng !== null && bboxRow.total_count > 0) {
+                const bounds = [
+                    [bboxRow.min_lng, bboxRow.min_lat], // Southwest coordinates
+                    [bboxRow.max_lng, bboxRow.max_lat]  // Northeast coordinates
+                ];
+
+                // Avoid extreme zoom levels if all points share the exact same coordinate
+                if (bboxRow.min_lng !== bboxRow.max_lng || bboxRow.min_lat !== bboxRow.max_lat) {
+                    map.fitBounds(bounds, {
+                        padding: 50, // Pixels around the bounding box
+                        maxZoom: 15, // Prevent over-zooming on small subsets/single points
+                        duration: 100 // Smooth transition animation duration in ms
+                    });
+                }
+            }
+            */
+            document.getElementById('record-count').innerText =
+                `Displaying ${features.length} of ${bboxRow.total_count} matching features (${(performance.now() - startTime).toFixed(1)}ms)`;
+        }
+
+
+        // Main execution chain
+        async function run() {
+            try {
+                await initDuckDB();
+                await initMap();
+                await loadData();
+                await applyFilters(); // Initial render
+                document.getElementById('loading-overlay').style.display = 'none';
+            } catch (err) {
+                console.error(err);
+                document.getElementById('loading-text').innerText = 'Error: ' + err.message;
+                document.querySelector('.spinner').style.display = 'none';
+            }
+        }
+
+        run();
+    </script>
+</body>
+</html>

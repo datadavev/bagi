@@ -29,7 +29,11 @@ classifiers = [
 ]
 dependencies = [
     "click>=8.5.0",
+    "duckdb>=1.5.6",
+    "fastapi[standard]>=0.142.2",
     "fsspec>=2026.9.0",
+    "mfusepy>=3.1.1",
+    "ndjson>=0.3.1",
     "pillow>=12.3.0",
 ]
 
@@ -42,7 +46,7 @@ dev = [
 ]
 
 [project.scripts]
-blofs = "bagi.__main__:main"
+bagi = "bagi.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/datadavev/bagi"
@@ -80,6 +84,9 @@ disallow_incomplete_defs = false
 check_untyped_defs = true
 strict = false
 
+[[tool.mypy.overrides]]
+module = ["fsspec.*", "mfusepy", "ndjson"]
+ignore_missing_imports = true
 
 [tool.ruff]
 src = ["src"]
@@ -114,9 +121,15 @@ select = [
 ignore = [
   "PLR",    # Design related pylint codes
   "ISC001", # Conflicts with formatter
+  "ARG002", # Unused argument, excluded because if flags in overridden methods
 ]
 unfixable = [
   "F401",   # Would remove unused imports
   "F841",   # Would remove unused variables
 ]
 flake8-unused-arguments.ignore-variadic-names = true  # allow unused *args/**kwargsisort.required-imports = ["from __future__ import annotations"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
