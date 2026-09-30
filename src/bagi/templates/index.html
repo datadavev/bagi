@@ -535,7 +535,6 @@
             // Update MapLibre Source
             map.getSource('geoparquet-data').setData(featureCollection);
 
-            /*
             // Zoom the map to the bounding box if valid coordinates are returned
             if (bboxRow && bboxRow.min_lng !== null && bboxRow.max_lng !== null && bboxRow.total_count > 0) {
                 const bounds = [
@@ -552,7 +551,6 @@
                     });
                 }
             }
-            */
             document.getElementById('record-count').innerText =
                 `Displaying ${features.length} of ${bboxRow.total_count} matching features (${(performance.now() - startTime).toFixed(1)}ms)`;
         }

@@ -9,7 +9,7 @@ import os
 import os.path
 import tempfile
 import zipfile
-from datetime import datetime
+from datetime import date, datetime
 
 import duckdb
 from PIL import Image
@@ -18,6 +18,13 @@ from PIL.ExifTags import GPSTAGS, IFD
 
 def get_logger():
     return logging.getLogger()
+
+
+class DateTimeEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()  # Converts to "YYYY-MM-DDTHH:MM:SS" format
+        return super().default(obj)
 
 
 def convert_to_degrees(value):
@@ -133,7 +140,9 @@ def create_parquet_index(zip_file) -> int:
     ) as ndtemp:
         temp_ndjson_path = ndtemp.name
         for entry in records:
-            ndtemp.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            ndtemp.write(
+                json.dumps(entry, cls=DateTimeEncoder, ensure_ascii=False) + "\n"
+            )
             nrecords += 1
 
     with tempfile.NamedTemporaryFile(
