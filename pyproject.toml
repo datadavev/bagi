@@ -27,7 +27,11 @@ classifiers = [
   "Topic :: Scientific/Engineering",
   "Typing :: Typed",
 ]
-dependencies = []
+dependencies = [
+    "click>=8.5.0",
+    "fsspec>=2026.9.0",
+    "pillow>=12.3.0",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -36,6 +40,9 @@ dev = [
   "pre-commit",
   "mypy >= 1",
 ]
+
+[project.scripts]
+blofs = "bagi.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/datadavev/bagi"
