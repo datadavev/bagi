@@ -86,13 +86,14 @@ def get_image_metadata_from_zip(zip_path):
 
                             if not date_str:
                                 date_str = exif.get(306)  # DateTime fallback in IFD0
-                                if date_str:
-                                    try:
-                                        date_taken = datetime.strptime(
-                                            date_str, "%Y:%m:%d %H:%M:%S"
-                                        )
-                                    except (ValueError, TypeError):
-                                        date_taken = None
+
+                            if date_str:
+                                try:
+                                    date_taken = datetime.strptime(
+                                        date_str, "%Y:%m:%d %H:%M:%S"
+                                    )
+                                except (ValueError, TypeError):
+                                    date_taken = None
 
                             # Retrieve GPS Info from the GPS IFD
                             try:
@@ -108,9 +109,7 @@ def get_image_metadata_from_zip(zip_path):
                         image_records.append(
                             {
                                 "path": file_info.filename,
-                                "date_created": date_taken.isoformat()
-                                if date_taken
-                                else None,
+                                "date_created": date_taken,
                                 "latitude": lat,
                                 "longitude": lon,
                             }
